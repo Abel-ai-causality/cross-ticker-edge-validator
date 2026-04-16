@@ -65,8 +65,13 @@ Or specify temporarily using the `--api-key` parameter.
 Check if an edge exists between two tickers and whether it is reasonable.
 
 ```bash
-python cross_ticker_edge_validator.py SSTK ETHUSD --api-key "sk-..."
+python cross_ticker_edge_validator.py SSTK --target ETHUSD --api-key "sk-..."
 ```
+
+**Parameters:**
+- `SSTK`: Source ticker (positional argument)
+- `--target ETHUSD`: Target ticker
+- `--api-key "..."`: Anthropic API Key
 
 **Output Example:**
 ```

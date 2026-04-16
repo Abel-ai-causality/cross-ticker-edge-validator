@@ -2,8 +2,8 @@
 """
 Cross-Ticker Edge Validator Agent
 
-验证两个 ticker 之间因果边的合理性。
-使用 Neo4j 提取边和上下文，用 Claude 4.6 (Sonnet) 判断边是否合理。
+Validate the reasonableness of causal edges between two tickers.
+Extract edges and context from Neo4j, use Claude 4.6 (Sonnet) to judge edge validity.
 """
 
 import os
@@ -13,7 +13,7 @@ import requests
 from typing import Optional
 from dataclasses import dataclass
 
-# 添加 abel-triple-fusion 到路径以使用其环境
+# Add abel-triple-fusion to path to use its environment
 sys.path.insert(0, '/Users/zeyu/abel/abel-triple-fusion')
 from app.core.config import get_config
 from neo4j import GraphDatabase
@@ -21,7 +21,7 @@ from neo4j import GraphDatabase
 
 @dataclass
 class EdgeValidationResult:
-    """边验证结果"""
+    """Edge validation result"""
     source: str
     target: str
     relationship: str
@@ -32,7 +32,7 @@ class EdgeValidationResult:
 
 
 class ClaudeClient:
-    """简单的 Claude API 客户端（使用 requests）"""
+    """Simple Claude API client (using requests)"""
 
     def __init__(self, api_key: str):
         self.api_key = api_key
@@ -40,7 +40,7 @@ class ClaudeClient:
         self.model = "claude-sonnet-4-6"  # Claude Sonnet 4.6
 
     def create_message(self, prompt: str, max_tokens: int = 2000, temperature: float = 0.2) -> str:
-        """发送消息到 Claude"""
+        """Send message to Claude"""
         headers = {
             "x-api-key": self.api_key,
             "anthropic-version": "2023-06-01",
@@ -67,7 +67,7 @@ class ClaudeClient:
 
 
 class CrossTickerEdgeValidator:
-    """跨 Ticker 边验证 Agent"""
+    """Cross-Ticker Edge Validation Agent"""
 
     def __init__(
         self,
@@ -76,25 +76,25 @@ class CrossTickerEdgeValidator:
         neo4j_password: str = "eY6WaJ9OZYTLvwlW7cDqle1d2",
         anthropic_api_key: Optional[str] = None,
     ):
-        # Neo4j 连接
+        # Neo4j connection
         self.neo4j_driver = GraphDatabase.driver(
             neo4j_uri,
             auth=(neo4j_user, neo4j_password),
             connection_acquisition_timeout=15
         )
 
-        # Claude 客户端
+        # Claude client
         api_key = anthropic_api_key or os.getenv("ANTHROPIC_API_KEY")
         if not api_key:
-            raise ValueError("需要提供 Anthropic API Key")
+            raise ValueError("Anthropic API Key is required")
         self.claude = ClaudeClient(api_key=api_key)
 
     def close(self):
-        """关闭连接"""
+        """Close connections"""
         self.neo4j_driver.close()
 
     def get_node_by_name(self, name: str) -> Optional[dict]:
-        """获取指定名称的节点"""
+        """Get node by specified name"""
         with self.neo4j_driver.session(database='neo4j') as session:
             result = session.run("""
                 MATCH (n:CausalNodeV2 {name: $name})
@@ -107,7 +107,7 @@ class CrossTickerEdgeValidator:
             return dict(record) if record else None
 
     def get_edge_between(self, source_name: str, target_name: str) -> Optional[dict]:
-        """获取两个节点之间的边"""
+        """Get edge between two nodes"""
         with self.neo4j_driver.session(database='neo4j') as session:
             result = session.run("""
                 MATCH (a:CausalNodeV2 {name: $source})-[r]-(b:CausalNodeV2 {name: $target})
@@ -119,9 +119,9 @@ class CrossTickerEdgeValidator:
             return dict(record) if record else None
 
     def get_node_neighbors(self, node_name: str, limit: int = 10) -> dict:
-        """获取节点的邻居（入边和出边）"""
+        """Get node neighbors (incoming and outgoing edges)"""
         with self.neo4j_driver.session(database='neo4j') as session:
-            # 出边
+            # Outgoing edges
             out_result = session.run("""
                 MATCH (n:CausalNodeV2 {name: $name})-[r]->(other)
                 RETURN other.name as target, type(r) as rel, r.weight as weight, r.tau as tau
@@ -130,7 +130,7 @@ class CrossTickerEdgeValidator:
             """, name=node_name, limit=limit)
             out_edges = [dict(r) for r in out_result]
 
-            # 入边
+            # Incoming edges
             in_result = session.run("""
                 MATCH (other)-[r]->(n:CausalNodeV2 {name: $name})
                 RETURN other.name as source, type(r) as rel, r.weight as weight, r.tau as tau
@@ -149,7 +149,7 @@ class CrossTickerEdgeValidator:
         source_context: dict,
         target_context: dict
     ) -> str:
-        """构建 LLM 验证 prompt"""
+        """Build LLM validation prompt"""
 
         prompt = f"""You are a financial causality expert. Your task is to evaluate whether a causal edge between two financial tickers is logically reasonable or just statistical correlation.
 
@@ -224,21 +224,21 @@ Guidelines:
         target_field: str = "close_price"
     ) -> EdgeValidationResult:
         """
-        验证两个 ticker 之间的边
+        Validate edge between two tickers
 
         Args:
-            source_ticker: 源 ticker (如 "SSTK")
-            target_ticker: 目标 ticker (如 "ETHUSD")
-            source_field: 字段名 (默认 "close_price")
-            target_field: 字段名 (默认 "close_price")
+            source_ticker: Source ticker (e.g., "SSTK")
+            target_ticker: Target ticker (e.g., "ETHUSD")
+            source_field: Field name (default "close_price")
+            target_field: Field name (default "close_price")
         """
-        # 构建完整节点名
+        # Build full node names
         source_name = f"{source_ticker}_{source_field}"
         target_name = f"{target_ticker}_{target_field}"
 
-        print(f"🔍 查找节点: {source_name} 和 {target_name}")
+        print(f"🔍 Finding nodes: {source_name} and {target_name}")
 
-        # 获取节点信息
+        # Get node info
         source_node = self.get_node_by_name(source_name)
         target_node = self.get_node_by_name(target_name)
 
@@ -262,9 +262,9 @@ Guidelines:
                 confidence=0.0
             )
 
-        print(f"✅ 找到节点: {source_node.get('name')} <-> {target_node.get('name')}")
+        print(f"✅ Found nodes: {source_node.get('name')} <-> {target_node.get('name')}")
 
-        # 获取边信息
+        # Get edge info
         edge = self.get_edge_between(source_name, target_name)
 
         if not edge:
@@ -277,26 +277,26 @@ Guidelines:
                 confidence=1.0
             )
 
-        print(f"✅ 找到边: {edge.get('from_node')} -[{edge.get('rel_type')}]-> {edge.get('to_node')} (tau={edge.get('tau')}, weight={edge.get('weight')})")
+        print(f"✅ Found edge: {edge.get('from_node')} -[{edge.get('rel_type')}]-> {edge.get('to_node')} (tau={edge.get('tau')}, weight={edge.get('weight')})")
 
-        # 获取上下文
-        print("📊 提取节点上下文...")
+        # Get context
+        print("📊 Extracting node context...")
         source_context = self.get_node_neighbors(source_name, limit=10)
         target_context = self.get_node_neighbors(target_name, limit=10)
 
-        # 构建 prompt
+        # Build prompt
         prompt = self.build_validation_prompt(
             source_node, target_node, edge, source_context, target_context
         )
 
-        # 调用 Claude
-        print("🤖 调用 Claude 进行验证...")
+        # Call Claude
+        print("🤖 Calling Claude for validation...")
         try:
             response_text = self.claude.create_message(prompt, max_tokens=2000, temperature=0.2)
 
-            # 解析响应
+            # Parse response
             content = response_text
-            # 提取 JSON
+            # Extract JSON
             json_start = content.find('{')
             json_end = content.rfind('}') + 1
             if json_start >= 0 and json_end > json_start:
@@ -325,7 +325,7 @@ Guidelines:
             )
 
     def print_result(self, result: EdgeValidationResult):
-        """打印验证结果"""
+        """Print validation result"""
         print("\n" + "=" * 60)
         print("🎯 EDGE VALIDATION RESULT")
         print("=" * 60)
@@ -341,7 +341,7 @@ Guidelines:
 
 
     def get_all_outgoing_edges(self, ticker: str, field: str = "close_price", limit: int = 50) -> list[dict]:
-        """获取指定 ticker 的所有出边"""
+        """Get all outgoing edges for specified ticker"""
         node_name = f"{ticker}_{field}"
         with self.neo4j_driver.session(database='neo4j') as session:
             result = session.run("""
@@ -355,7 +355,7 @@ Guidelines:
             return [dict(r) for r in result]
 
     def get_all_incoming_edges(self, ticker: str, field: str = "close_price", limit: int = 50) -> list[dict]:
-        """获取指定 ticker 的所有入边"""
+        """Get all incoming edges for specified ticker"""
         node_name = f"{ticker}_{field}"
         with self.neo4j_driver.session(database='neo4j') as session:
             result = session.run("""
@@ -376,51 +376,51 @@ Guidelines:
         field: str = "close_price"
     ) -> list[EdgeValidationResult]:
         """
-        批量验证单个 ticker 的所有边
+        Batch validate all edges for a single ticker
 
         Args:
-            ticker: 要验证的 ticker (如 "NVDA")
-            mode: "out" 验证出边，"in" 验证入边
-            top_n: 验证前 N 条边（按 tau 绝对值排序）
-            field: 字段名
+            ticker: Ticker to validate (e.g., "NVDA")
+            mode: "out" for outgoing edges, "in" for incoming edges
+            top_n: Validate top N edges (sorted by abs(tau))
+            field: Field name
         """
         results = []
 
         if mode == "out":
             edges = self.get_all_outgoing_edges(ticker, field, limit=top_n)
-            print(f"📤 {ticker} 的出边（Top {len(edges)}）:")
+            print(f"📤 {ticker} outgoing edges (Top {len(edges)}):")
         else:
             edges = self.get_all_incoming_edges(ticker, field, limit=top_n)
-            print(f"📥 {ticker} 的入边（Top {len(edges)}）:")
+            print(f"📥 {ticker} incoming edges (Top {len(edges)}):")
 
         if not edges:
-            print(f"  未找到 {ticker} 的{'出' if mode == 'out' else '入'}边")
+            print(f"  No {'outgoing' if mode == 'out' else 'incoming'} edges found for {ticker}")
             return results
 
-        # 打印概览
+        # Print overview
         for i, e in enumerate(edges[:5], 1):
             direction = f"{e['source']} -> {e['target']}"
             print(f"  {i}. {direction} (tau={e['tau']}, weight={e['weight']:.4f})")
 
-        print(f"\n开始验证前 {min(top_n, len(edges))} 条边...\n")
+        print(f"\nStarting validation of top {min(top_n, len(edges))} edges...\n")
 
-        # 逐条验证
+        # Validate each edge
         for i, edge in enumerate(edges[:top_n], 1):
-            print(f"[{i}/{min(top_n, len(edges))}] 验证: {edge['source']} -> {edge['target']}")
+            print(f"[{i}/{min(top_n, len(edges))}] Validating: {edge['source']} -> {edge['target']}")
 
-            # 获取节点信息
+            # Get node info
             source_node = self.get_node_by_name(edge['source'])
             target_node = self.get_node_by_name(edge['target'])
 
             if not source_node or not target_node:
-                print(f"  ⚠️  无法获取节点信息，跳过")
+                print(f"  ⚠️  Cannot get node info, skipping")
                 continue
 
-            # 获取上下文
+            # Get context
             source_context = self.get_node_neighbors(edge['source'], limit=5)
             target_context = self.get_node_neighbors(edge['target'], limit=5)
 
-            # 构建 prompt
+            # Build prompt
             edge_info = {
                 'from_node': edge['source'],
                 'to_node': edge['target'],
@@ -433,11 +433,11 @@ Guidelines:
                 source_node, target_node, edge_info, source_context, target_context
             )
 
-            # 调用 Claude
+            # Call Claude
             try:
                 response_text = self.claude.create_message(prompt, max_tokens=1500, temperature=0.2)
 
-                # 解析 JSON
+                # Parse JSON
                 content = response_text
                 json_start = content.find('{')
                 json_end = content.rfind('}') + 1
@@ -460,7 +460,7 @@ Guidelines:
                 print(f"  {action_emoji} {result.action} (confidence: {result.confidence:.0%})")
 
             except Exception as e:
-                print(f"  ❌ 验证失败: {str(e)[:50]}")
+                print(f"  ❌ Validation failed: {str(e)[:50]}")
                 results.append(EdgeValidationResult(
                     source=edge['source'],
                     target=edge['target'],
@@ -473,38 +473,38 @@ Guidelines:
         return results
 
     def print_batch_summary(self, ticker: str, mode: str, results: list[EdgeValidationResult]):
-        """打印批量验证结果汇总"""
+        """Print batch validation results summary"""
         print("\n" + "=" * 70)
-        print(f"📊 {ticker} {'出' if mode == 'out' else '入'}边验证汇总")
+        print(f"📊 {ticker} {'outgoing' if mode == 'out' else 'incoming'} edges validation summary")
         print("=" * 70)
 
         if not results:
-            print("无验证结果")
+            print("No validation results")
             return
 
-        # 统计
+        # Statistics
         keep = sum(1 for r in results if r.action == "KEEP")
         remove = sum(1 for r in results if r.action == "REMOVE")
         modify = sum(1 for r in results if r.action == "MODIFY")
         error = sum(1 for r in results if r.action in ["ERROR", "UNKNOWN"])
 
-        print(f"\n总计: {len(results)} 条边")
+        print(f"\nTotal: {len(results)} edges")
         print(f"  ✅ KEEP:    {keep} ({keep/len(results):.0%})")
         print(f"  ❌ REMOVE:  {remove} ({remove/len(results):.0%})")
         print(f"  ⚠️  MODIFY:  {modify} ({modify/len(results):.0%})")
         print(f"  ❓ ERROR:   {error} ({error/len(results):.0%})")
 
-        # 列出可疑边（REMOVE）
+        # List suspicious edges (REMOVE)
         if remove > 0:
-            print(f"\n🔍 建议移除的可疑边:")
+            print(f"\n🔍 Recommended suspicious edges to remove:")
             for r in results:
                 if r.action == "REMOVE":
                     print(f"  ❌ {r.source[:25]:25} -> {r.target[:25]:25} ({r.confidence:.0%})")
 
-        # 列出高置信度 KEEP
+        # List high confidence KEEP
         high_conf_keep = [r for r in results if r.action == "KEEP" and r.confidence > 0.8]
         if high_conf_keep:
-            print(f"\n✅ 高置信度合理的边:")
+            print(f"\n✅ High confidence reasonable edges:")
             for r in high_conf_keep[:5]:
                 print(f"  ✅ {r.source[:25]:25} -> {r.target[:25]:25} ({r.confidence:.0%})")
 
@@ -512,7 +512,7 @@ Guidelines:
 
 
 def main():
-    """主函数 - 示例用法"""
+    """Main function - example usage"""
     import argparse
 
     parser = argparse.ArgumentParser(description="Cross-Ticker Edge Validator")
@@ -525,15 +525,15 @@ def main():
 
     args = parser.parse_args()
 
-    # 获取 API key
+    # Get API key
     api_key = args.api_key or os.getenv("ANTHROPIC_API_KEY")
     if not api_key:
-        print("❌ 请提供 Anthropic API Key：")
-        print("   方式1: 设置环境变量 ANTHROPIC_API_KEY")
-        print("   方式2: 使用 --api-key 参数")
+        print("❌ Please provide Anthropic API Key:")
+        print("   Option 1: Set ANTHROPIC_API_KEY environment variable")
+        print("   Option 2: Use --api-key parameter")
         sys.exit(1)
 
-    # 创建验证器
+    # Create validator
     validator = CrossTickerEdgeValidator(
         anthropic_api_key=api_key,
         neo4j_uri="neo4j://10.16.176.189:7687",
@@ -543,13 +543,13 @@ def main():
 
     try:
         if args.target:
-            # 单条边验证模式
-            print(f"\n🔎 验证单条边: {args.ticker} -> {args.target}")
+            # Single edge validation mode
+            print(f"\n🔎 Validating single edge: {args.ticker} -> {args.target}")
             result = validator.validate_edge(args.ticker, args.target)
             validator.print_result(result)
         else:
-            # 批量单边验证模式
-            print(f"\n🔎 批量验证 {args.ticker} 的 {'出' if args.mode == 'out' else '入'}边 (Top {args.top})")
+            # Batch single-ticker validation mode
+            print(f"\n🔎 Batch validating {args.ticker} {'outgoing' if args.mode == 'out' else 'incoming'} edges (Top {args.top})")
             results = validator.validate_single_ticker_edges(
                 ticker=args.ticker,
                 mode=args.mode,

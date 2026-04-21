@@ -1,6 +1,8 @@
 # Cross-Ticker Edge Validator Agent
 
-Automatically validate the reasonableness of causal edges between financial tickers using LLM (Claude 4.6 Sonnet), distinguishing true causal relationships from statistical noise.
+Automatically validate the reasonableness of causal edges between financial tickers using LLM, distinguishing true causal relationships from statistical noise.
+
+> **⚡ Latest Update (2026-04-21)**: Added **Balanced Validator v2** for PuppyGraph (via OpenRouter). The new validator uses a refined prompt that produces a reasonable KEEP/MODIFY/REMOVE distribution (~33%/33%/14%) instead of the original 0%/0%/100% over-strict output. See [BALANCED_VALIDATION_REPORT.md](./BALANCED_VALIDATION_REPORT.md) for full results across 6 key tickers (NVDA, GOOGL, MSFT, TSLA, AAPL, AMZN).
 
 ## Background Problem
 
@@ -9,6 +11,17 @@ Causal discovery algorithms in causal graphs may produce numerous **spurious cor
 - NVDA → WDCUSD: How could a GPU company "cause" Western Digital's stock price?
 
 While these edges are statistically significant, they lack **domain logic** support. This Agent uses LLM combined with domain knowledge to automatically identify and flag suspicious edges.
+
+---
+
+## Two Validator Variants
+
+| File | Graph Backend | LLM Provider | Prompt Style | Use When |
+|------|---------------|--------------|--------------|----------|
+| `cross_ticker_edge_validator.py` | Neo4j (Bolt) | Anthropic (direct) | Strict (mechanism-only) | Legacy Neo4j deployment |
+| **`edge_validator_balanced.py`** ⭐ | **PuppyGraph (HTTP)** | **OpenRouter (DeepSeek etc.)** | **Balanced v2** | **Current production (recommended)** |
+
+The project's graph layer migrated from Neo4j to **PuppyGraph** (HTTP API on port 443); the LLM layer moved to **OpenRouter** so we can compare DeepSeek / Qwen / Claude / etc. without SDK lock-in.
 
 ---
 
@@ -318,3 +331,157 @@ MIT License - see [LICENSE](LICENSE) for details
 
 - [abel-triple-fusion](https://github.com/Abel-ai-causality/abel-triple-fusion) - Causal graph construction and validation framework
 - [Abel-skills](https://github.com/Abel-ai-causality/Abel-skills) - Abel AI Skills Collection
+
+---
+
+# Balanced Validator v2 (PuppyGraph + OpenRouter) ⭐
+
+The rest of this README documents the **new** `edge_validator_balanced.py`, which is the recommended entry point for current production.
+
+## Why Balanced v2?
+
+Earlier iterations of the prompt were either too strict (REMOVE 100% of edges because "no direct causal mechanism") or too lenient (KEEP 100% of edges). Volume correlations between stocks are often driven by **sector co-movement, ETF flows, and macro factors** — not just direct business relationships. Balanced v2 encodes this reality.
+
+### Verdict distribution on 120 incoming edges across 6 key tickers
+
+| Verdict | Count | % |
+|---------|-------|---|
+| ✅ KEEP | 40 | 33.3% |
+| ⚠️ MODIFY | 40 | 33.3% |
+| ❌ REMOVE | 17 | 14.2% |
+| 💥 ERROR | 18 | 15.0% |
+| ❓ UNKNOWN | 5 | 4.2% |
+
+See [BALANCED_VALIDATION_REPORT.md](./BALANCED_VALIDATION_REPORT.md) for per-ticker breakdown and edge-level judgments.
+
+## Quick Start (Balanced v2)
+
+### 1. Install dependencies
+
+```bash
+pip install requests
+# Python 3.11+ recommended
+```
+
+### 2. Set environment variables
+
+```bash
+# OpenRouter LLM (required)
+export OPENROUTER_API_KEY="sk-or-v1-..."
+
+# PuppyGraph password (required - pick one based on env)
+export PUPPYGRAPH_PROD_PASSWORD="..."    # for --env prod
+export PUPPYGRAPH_SIT_PASSWORD="..."     # for --env sit
+
+# Optional overrides
+export PUPPYGRAPH_PROD_URL="https://puppygraph.abel.ai"
+export PUPPYGRAPH_PROD_USER="puppygraph"
+```
+
+### 3. Run validation
+
+```bash
+# Incoming edges (what influences NVDA's volume)
+python edge_validator_balanced.py NVDA \
+  --field volume \
+  --mode in \
+  --top 20 \
+  --env prod \
+  --model deepseek/deepseek-chat
+
+# Outgoing edges (what NVDA's volume influences)
+python edge_validator_balanced.py NVDA \
+  --field volume \
+  --mode out \
+  --top 20 \
+  --env prod
+```
+
+Results are saved as JSON to `./validation_results/validation_{TICKER}_{FIELD}_{MODE}_{TIMESTAMP}.json`.
+
+## Architecture (Balanced v2)
+
+```
+┌──────────────────────┐
+│    PuppyGraph        │
+│  (CausalNodeV3)      │
+│   HTTP API :443      │
+└──────────┬───────────┘
+           │ Cypher via /submitCypher
+           ▼
+┌──────────────────────┐
+│ puppygraph_client.py │  ← HTTP client (no Bolt protocol)
+└──────────┬───────────┘
+           │
+           ▼
+┌──────────────────────────────┐
+│ edge_validator_balanced.py   │
+│  - DISTINCT edge query       │
+│  - Balanced v2 prompt        │
+│  - Retry (up to 3 attempts)  │
+│  - Markdown-aware parser     │
+└──────────┬───────────────────┘
+           │ /chat/completions
+           ▼
+┌──────────────────────┐
+│    OpenRouter        │
+│ (DeepSeek / Qwen /   │
+│  Claude / Nemotron)  │
+└──────────────────────┘
+```
+
+## Key Design Choices
+
+### 1. **DEFAULT TO KEEP** principle
+The prompt explicitly instructs the LLM: _"When in doubt, prefer KEEP or MODIFY over REMOVE."_ This reflects that stock volumes correlate for many legitimate reasons (sector rotations, index flows) beyond direct business relationships.
+
+### 2. Edge deduplication with `DISTINCT`
+PuppyGraph's `CAUSES` relationship can have duplicates between the same node pair at different taus. The validator uses `RETURN DISTINCT source.node_name, target.node_name` to ensure each returned edge is a unique ticker pair.
+
+### 3. Resilient parsing + retry
+LLM responses occasionally return empty content or truncated output. The validator:
+- Retries up to 2 times on empty/malformed responses
+- Accepts markdown formats (`**Verdict:**`, `## Verdict`)
+- Falls back to keyword matching if structured fields are missing
+- Never crashes on `NoneType.split()` — returns `ERROR` verdict with diagnostic message
+
+### 4. Environment-variable credentials
+No secrets in code. Credentials are read from environment variables (`PUPPYGRAPH_*_PASSWORD`, `OPENROUTER_API_KEY`) — safe to commit to public repos.
+
+## Sample Output
+
+```
+======================================================================
+🎯 Balanced Edge Validator (OpenRouter)
+======================================================================
+Ticker: NVDA
+Field: volume
+Mode: in
+Top: 20
+Env: prod
+======================================================================
+
+📥 Found 20 incoming edges
+
+[1/20] ADI_volume → NVDA_volume
+  ✅ KEEP (90%) - Same sector (semiconductors)...
+[2/20] AAPL_volume → NVDA_volume
+  ✅ KEEP (85%) - Both mega-cap tech, major NVDA customer...
+[3/20] RTX_volume → NVDA_volume
+  ✅ KEEP (80%) - Defense industry uses NVIDIA GPUs...
+...
+[18/20] SON_volume → NVDA_volume
+  ❌ REMOVE (85%) - Small packaging company, no connection...
+
+======================================================================
+📊 Summary Statistics
+======================================================================
+  ✅ KEEP:     10 (50.0%)
+  ⚠️  MODIFY:   6 (30.0%)
+  ❌ REMOVE:   2 (10.0%)
+  💥 ERROR:    2 (10.0%)
+  ────────────────
+  📊 Total:   20
+
+💾 Results saved to: ./validation_results/validation_NVDA_volume_in_20260421_122734.json
+```

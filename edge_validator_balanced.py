@@ -20,7 +20,7 @@ from typing import List, Dict, Any, Optional
 class EdgeValidatorBalanced:
     """使用 PuppyGraph HTTP API 和 OpenRouter LLM 验证边（平衡版本）"""
     
-    def __init__(self, openrouter_api_key: str, env: str = "sit", model: str = "nvidia/nemotron-3-super-120b-a12b", 
+    def __init__(self, openrouter_api_key: str, env: str = "sit", model: str = "anthropic/claude-sonnet-4-6",
                  output_dir: str = "./validation_results"):
         self.openrouter_api_key = openrouter_api_key
         self.env = env
@@ -30,6 +30,7 @@ class EdgeValidatorBalanced:
         # 确保输出目录存在
         os.makedirs(output_dir, exist_ok=True)
         
+        # PuppyGraph 配置
         # PuppyGraph configuration (credentials from environment variables)
         if env == "sit":
             self.puppy_url = os.getenv(
@@ -102,14 +103,15 @@ class EdgeValidatorBalanced:
         return self.query_puppy(query)
     
     def call_openrouter(self, system_prompt: str, user_prompt: str) -> Dict:
-        """调用 OpenRouter API"""
+        """Call OpenRouter API with model verification"""
         headers = {
             "Authorization": f"Bearer {self.openrouter_api_key}",
             "Content-Type": "application/json",
             "HTTP-Referer": "https://abel.ai",
             "X-Title": "Abel Edge Validator (Balanced)"
         }
-        
+
+        # Force specific model - no fallback
         payload = {
             "model": self.model,
             "messages": [
@@ -117,95 +119,97 @@ class EdgeValidatorBalanced:
                 {"role": "user", "content": user_prompt}
             ],
             "temperature": 0.1,
-            "max_tokens": 500
+            "max_tokens": 800,  # Increased for detailed reasoning
+            "provider": {
+                "order": ["Anthropic"],  # Force Anthropic provider for Claude models
+                "allow_fallbacks": False  # Do NOT fallback to other models
+            }
         }
-        
+
         resp = requests.post(
             "https://openrouter.ai/api/v1/chat/completions",
             headers=headers,
             json=payload,
-            timeout=60
+            timeout=90  # Increased timeout for Claude
         )
-        
-        if resp.status_code != 200:
+
+        if resp.status_code == 403:
+            raise RuntimeError(
+                f"Claude Sonnet 4.6 is not available in your region (403 Forbidden). "
+                f"Model requested: {self.model}. "
+                f"Consider using a different model or VPN."
+            )
+        elif resp.status_code != 200:
             print(f"OpenRouter Error: {resp.status_code}")
             print(f"Response: {resp.text[:500]}")
-        
+
         resp.raise_for_status()
-        return resp.json()
+        result = resp.json()
+
+        # Verify actual model used
+        actual_model = result.get("model", "unknown")
+        if self.model not in actual_model and "claude" not in actual_model.lower():
+            print(f"⚠️  Warning: Expected {self.model}, but got {actual_model}")
+
+        return result
     
     def get_balanced_system_prompt(self) -> str:
-        """返回平衡的系统提示词 v2 - 更注重同行业/客户关系"""
-        return """You are an expert financial causal graph validator. Evaluate whether a volume-based causal edge between two stocks is reasonable.
+        """返回平衡的系统提示词 v3 - 要求具体的业务层面原因"""
+        return """You are an expert financial causal graph validator. Your task is to evaluate whether a volume-based causal edge between two stocks is reasonable, providing SPECIFIC and DETAILED business-level reasoning.
 
 ## KEY PRINCIPLE
 
-Volume correlations in stocks are often driven by:
-1. **Sector co-movement** (MOST COMMON - stocks in same sector move together due to sector ETFs, common investors, shared fundamentals)
-2. **Market-wide factors** (macro events, Fed decisions, risk-on/off)
-3. **Index/ETF flows** (SPY, QQQ, sector ETFs drag all holdings together)
-4. **Direct business relationships** (supplier/customer/competitor)
-5. **Similar market cap / trading patterns**
+Volume correlations between stocks can be legitimate when there is a concrete business link. Generic reasons like "same sector" or "market correlation" are INSUFFICIENT. You must identify the SPECIFIC mechanism.
 
 ## VERDICT RULES
 
-### KEEP (default for plausible relationships):
-- **Same sector or sub-sector** (both semi, both tech, both banks, both energy, etc.)
-- **Direct business relationship** (e.g., NVDA ↔ its customers GOOGL/MSFT/META, or suppliers TSM/ASML)
-- **Index component peers** (both in S&P 500, both in QQQ, both in sector ETF)
-- **Market cap peers in related business**
-- **Adjacent industries** (hardware → software, retail → consumer goods, energy → transport)
+### KEEP (strong, specific business link):
+Use KEEP only when you can articulate a SPECIFIC business relationship:
 
-### MODIFY (weak but possible):
-- Different sectors with some indirect link
-- Cross-sector pairs where macro factor is shared
-- Both large cap US stocks (everything correlates somewhat via SPY)
+**Valid KEEP reasons (examples of specificity required):**
+- **Direct supplier-customer with quantifiable relationship**: "GOOGL → NVDA because Google Cloud purchases NVIDIA A100/H100 GPUs for AI training, representing ~$X billion in annual revenue"
+- **Clear competitive dynamic**: "AMD ↔ NVDA because both compete for datacenter GPU market share, with AMD MI300X directly challenging NVIDIA H100"
+- **Supply chain dependency**: "ENTG → NVDA because Entegris supplies ultra-pure chemicals essential for NVIDIA's chip manufacturing process"
+- **Joint product/technology**: "KLAC → NVDA because KLA's inspection equipment is used in NVIDIA's foundry partner (TSMC) facilities"
 
-### REMOVE (truly unrelated):
-- **Only when there is NO plausible connection**
-- Small-cap obscure company ↔ unrelated major stock
-- Foreign small-cap ↔ US large-cap in different sector
-- Must be confident NO market mechanism connects them
+### MODIFY (weak or indirect link):
+Use MODIFY when there is some connection but it's indirect or overstated:
 
-## IMPORTANT: DEFAULT TO KEEP
+**Valid MODIFY reasons:**
+- **Indirect supply chain**: "TXN → NVDA because Texas Instruments supplies analog chips that go into NVIDIA-based systems, but not directly into NVIDIA's products"
+- **Sector correlation without direct link**: "INTC → NVDA because both are semiconductor companies affected by same fab capacity constraints, but don't compete directly in GPUs"
+- **Index/ETF effect**: "UNH → NVDA because both are S&P 500 components and move with index flows, but no business relationship"
 
-When in doubt, prefer KEEP or MODIFY. Remember:
-- Large US stocks correlate due to index/ETF effects
-- Same-sector stocks ALWAYS co-move (sector rotations)
-- "No direct business relationship" is NOT enough reason to REMOVE
-- Only REMOVE if you're confident the relationship is spurious
+### REMOVE (no specific business link):
+Use REMOVE when you cannot identify a concrete business relationship:
 
-## EXAMPLES
+**Valid REMOVE reasons:**
+- **Completely unrelated businesses**: "SON → NVDA because Sonoco is a packaging company with zero business relationship to NVIDIA's GPU/AI business"
+- **No supply chain connection**: "HAFC → NVDA because Hanmi Financial is a small regional bank with no lending or business relationship to NVIDIA"
+- **Geographic/industry mismatch**: "LITB → NVDA because LightInTheBox is a Chinese e-commerce SMB with no connection to NVIDIA's enterprise GPU business"
 
-### KEEP (broad acceptance):
-- NVDA ↔ AMD: same sector (semiconductors)
-- NVDA ↔ GOOGL: GOOGL is major NVDA customer (AI/Cloud)
-- NVDA ↔ NXPI: both semiconductor companies - KEEP
-- NVDA ↔ MSFT: MSFT major NVDA customer (Azure, Copilot)
-- NVDA ↔ ENTG: ENTG supplies materials to semiconductor industry - KEEP
-- AAPL ↔ MSFT: both mega-cap tech, QQQ components
-- XOM ↔ CVX: both oil majors
-- JPM ↔ BAC: both major US banks
-- Any two S&P 500 stocks in same sector: KEEP
+## FORBIDDEN VAGUE REASONINGS (NEVER USE THESE):
 
-### MODIFY (weak link):
-- JPM ↔ AAPL: financials vs tech, both mega-cap, indirect macro link
-- XOM ↔ DAL: energy vs airlines, indirect via oil prices
-- RH ↔ NVDA: retail vs tech, but both discretionary spending beneficiaries
+❌ "Same sector" - specify WHAT they do in that sector
+❌ "Market correlation" - explain WHY they correlate
+❌ "Customer relationship" - specify WHAT the customer buys and for what purpose
+❌ "Tech company" - explain the SPECIFIC tech area and relationship
+❌ "Related industries" - articulate the EXACT supply chain or competitive link
 
-### REMOVE (truly unrelated):
-- AEG (European insurance) ↔ NVDA: small foreign insurer, no overlap
-- LITB (tiny Chinese e-commerce SMB) ↔ NVDA: micro-cap unrelated
-- HAFC (small regional bank) ↔ NVDA: small regional bank, no overlap
-- ZEUS (small steel) ↔ NVDA: small-cap unrelated industry
+## REASONING REQUIREMENTS
+
+Your Reasoning MUST include:
+1. What each company SPECIFICALLY does (e.g., "GOOGL operates Google Cloud Platform providing AI/ML infrastructure")
+2. The EXACT nature of their relationship (e.g., "GOOGL purchases NVIDIA GPUs to power their TPUs and AI training clusters")
+3. WHY this would cause volume co-movement (e.g., "when GOOGL announces expanded AI capacity, they increase GPU orders, driving NVDA volume")
 
 ## OUTPUT FORMAT
 
 Verdict: <KEEP|MODIFY|REMOVE>
 Confidence: <0-100>
-Reasoning: <One sentence focusing on sector/business link>
+Reasoning: <2-3 sentences with SPECIFIC business details. Format: "[Source company] [specific business] → [Target company] [specific business]. [Exact relationship nature]. [Why volume co-moves].">
 
-**REMEMBER: DEFAULT TO KEEP. Only REMOVE when truly no connection exists.**
+**REMEMBER: VAGUE REASONINGS ARE UNACCEPTABLE. If you cannot provide specific business details, use MODIFY or REMOVE.**
 """
     
     def validate_edge(self, source: str, target: str, weight: Any = None, 

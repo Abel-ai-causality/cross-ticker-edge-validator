@@ -326,7 +326,7 @@ def build_negative_unrelated(companies: list, relationships: dict,
 # RUNNER
 # ============================================================================
 
-def run_benchmark(n_per_category: dict = None):
+def run_benchmark(n_per_category: dict = None, checkpoint_every: int = 50):
     """Build dataset from Wikidata, run validator, compute metrics."""
     if n_per_category is None:
         n_per_category = {"same_industry": 20, "corporate": 10, "unrelated": 20}
@@ -390,6 +390,13 @@ def run_benchmark(n_per_category: dict = None):
     print(f"{'='*70}\n")
 
     results = []
+    timestamp_run = datetime.now().strftime("%Y%m%d_%H%M%S")
+    checkpoint_path = (
+        f"/Users/zeyu/abel_2/validation_results/"
+        f"benchmark_wikidata_checkpoint_{timestamp_run}.json"
+    )
+    os.makedirs(os.path.dirname(checkpoint_path), exist_ok=True)
+
     for i, pair in enumerate(benchmark, 1):
         src = f"{pair['source']}_volume"
         tgt = f"{pair['target']}_volume"
@@ -419,6 +426,19 @@ def run_benchmark(n_per_category: dict = None):
             print(f"  💥 Error: {e}")
             results.append({**pair, "actual_verdict": "ERROR",
                             "error": str(e), "match": False})
+
+        # Periodic checkpoint save
+        if i % checkpoint_every == 0:
+            try:
+                with open(checkpoint_path, 'w') as f:
+                    json.dump({
+                        "completed": i,
+                        "total": len(benchmark),
+                        "results": results,
+                    }, f, indent=2, default=str)
+                print(f"  💾 Checkpoint saved: {i}/{len(benchmark)}")
+            except Exception as e:
+                print(f"  ⚠️ Checkpoint save failed: {e}")
         print()
 
     return results
@@ -479,7 +499,29 @@ def compute_metrics(results):
 
 
 def main():
-    results = run_benchmark()
+    import argparse
+    parser = argparse.ArgumentParser(
+        description="Wikidata-grounded benchmark for edge validator")
+    parser.add_argument("--same", type=int, default=20,
+                        help="Number of same-industry pairs (expected KEEP)")
+    parser.add_argument("--corp", type=int, default=10,
+                        help="Number of corporate-relationship pairs (expected KEEP)")
+    parser.add_argument("--unrelated", type=int, default=20,
+                        help="Number of unrelated pairs (expected REMOVE)")
+    parser.add_argument("--checkpoint-every", type=int, default=50,
+                        help="Save checkpoint every N pairs")
+    args = parser.parse_args()
+
+    n_per_category = {
+        "same_industry": args.same,
+        "corporate": args.corp,
+        "unrelated": args.unrelated,
+    }
+    print(f"📋 Sample sizes: {n_per_category}")
+    print(f"   Total: {sum(n_per_category.values())} pairs")
+    print()
+
+    results = run_benchmark(n_per_category, args.checkpoint_every)
     metrics, by_category = compute_metrics(results)
 
     # Print summary
